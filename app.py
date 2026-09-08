@@ -13,7 +13,7 @@ from selenium.webdriver.support import expected_conditions as EC
 app = Flask(__name__)
 
 # ==========================================================
-# FUNÇÕES DE APOIO (Adaptadas do seu código original)
+# FUNÇÕES DE APOIO
 # ==========================================================
 
 def criar_driver(caminho_download):
@@ -149,6 +149,11 @@ def processar_linha():
     if not link or not ficha:
         return jsonify({"erro": "Link ou ficha ausentes"}), 400
 
+    # Tratamento da URL para resolver o erro "invalid argument" do Selenium
+    link = str(link).strip()
+    if not link.startswith(('http://', 'https://')):
+        link = f"https://{link}"
+
     print(f"🚀 Iniciando processamento da Ficha: {ficha} | Link: {link}")
 
     # 2. Cria uma pasta temporária ÚNICA para essa execução
@@ -159,7 +164,7 @@ def processar_linha():
     try:
         # 3. Inicia o Selenium e navega
         driver = criar_driver(pasta_tmp)
-        driver.get(str(link))
+        driver.get(link)
         time.sleep(5)
 
         # 4. Executa a sua automação de clique/download
