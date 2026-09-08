@@ -9,6 +9,8 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
 
 app = Flask(__name__)
 
@@ -36,7 +38,6 @@ def criar_driver(caminho_download):
     }
     options.add_experimental_option("prefs", prefs)
     
-    # Aponta para o ChromeDriver no container Linux
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=options)
 
@@ -64,40 +65,67 @@ def esperar_download(caminho_download, arquivos_antes, timeout=60):
 
 
 def baixaraquivos(driver, caminho_download):
-    """Lógica original de cliques no Google Drive mantida"""
-    all_windows = driver.window_handles
-    for window in all_windows:
-        driver.switch_to.window(window)
-        if "https://drive.google.com/drive/folders/" in driver.current_url:
-            break
-    time.sleep(1)
-
-    WebDriverWait(driver, 30).until(
-        EC.element_to_be_clickable((By.CLASS_NAME, "FAGDGb"))
-    )
-    time.sleep(2)
-
-    elementos = driver.find_elements(By.CLASS_NAME, "FAGDGb")
-    for elemento in elementos:
-        elemento.click()
-        time.sleep(2)
-
-        try:
-            arquivos_antes = set(os.listdir(caminho_download))
-            WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div/div[5]/div[1]/div/div/div/div[2]/div/div[4]/div/div[2]/div/div[5]"))
-            ).click()
-            esperar_download(caminho_download, arquivos_antes)
-        except Exception:
-            elemento.click()
-            time.sleep(2)
-            arquivos_antes = set(os.listdir(caminho_download))
-            WebDriverWait(driver, 30).until(
-                EC.element_to_be_clickable((By.XPATH, "/html/body/div[2]/div/div[5]/div[1]/div/div/div/div[2]/div/div[4]/div/div[2]/div/div[5]"))
-            ).click()
-            esperar_download(caminho_download, arquivos_antes)
-
-    return True
+    """Nova lógica robusta: Botão Direito -> Download"""
+    print("Aguardando carregamento da pasta do Drive...")
+    time.sleep(5)  # Dá tempo para os arquivos renderizarem na tela
+    
+    try:
+        # Encontra arquivos independentemente de estarem em 'grade' ou 'lista'
+        arquivos = WebDriverWait(driver, 20).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[role='row'], [role='gridcell']"))
+        )
+        
+        print(f"Encontrados {len(arquivos)} arquivos/pastas. Iniciando extração...")
+        
+        for arquivo in arquivos:
+            try:
+                # Rola até o arquivo para garantir o clique
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", arquivo)
+                time.sleep(1)
+                
+                # Clica com o botão direito no arquivo
+                ActionChains(driver).context_click(arquivo).perform()
+                time.sleep(2)
+                
+                # Pega as opções do menu que abriu
+                opcoes_menu = driver.find_elements(By.CSS_SELECTOR, "div[role='menuitem']")
+                
+                clicou_download = False
+                for opcao in opcoes_menu:
+                    texto = opcao.text.lower()
+                    if "download" in texto:
+                        arquivos_antes = set(os.listdir(caminho_download))
+                        opcao.click()
+                        clicou_download = True
+                        
+                        # Verifica se o Google mostrou aquela tela de "Arquivo grande, não pode verificar vírus"
+                        time.sleep(2)
+                        try:
+                            btn_virus = driver.find_element(By.XPATH, "//*[contains(translate(text(), 'DOWNLOAD', 'download'), 'download')]")
+                            if btn_virus:
+                                btn_virus.click()
+                        except:
+                            pass
+                            
+                        # Aguarda o download concluir
+                        esperar_download(caminho_download, arquivos_antes)
+                        break
+                
+                # Se a opção de download não existir ali (ex: clicou no fundo sem querer), fecha o menu
+                if not clicou_download:
+                    ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    time.sleep(1)
+                    
+            except Exception as e:
+                print(f"Ignorando elemento inválido. Erro: {e}")
+                ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                time.sleep(1)
+                
+        return True
+        
+    except Exception as e:
+        print(f"Erro principal no baixaraquivos: {e}")
+        raise Exception("Nenhum arquivo encontrado ou a pasta demorou muito para carregar.")
 
 
 def salva_apenas_guia(pasta_origem, ficha):
@@ -112,6 +140,7 @@ def salva_apenas_guia(pasta_origem, ficha):
         if os.path.isfile(caminho_completo):
             nome_minusculo = arquivo.lower()
 
+            # Mantém apenas se for PDF e tiver "guia" no nome
             if nome_minusculo.endswith(".pdf") and "guia" in nome_minusculo and not achou_guia:
                 caminho_guia_encontrada = caminho_completo
                 achou_guia = True
@@ -124,7 +153,7 @@ def salva_apenas_guia(pasta_origem, ficha):
     if not achou_guia:
         return None
 
-    # Renomeia o arquivo dentro da mesma pasta temporária
+    # Renomeia o arquivo que sobrou
     nome_novo_pdf = f"Guia - {ficha_limpa}.pdf"
     caminho_arquivo_final = os.path.join(pasta_origem, nome_novo_pdf)
     shutil.move(caminho_guia_encontrada, caminho_arquivo_final)
@@ -138,7 +167,6 @@ def salva_apenas_guia(pasta_origem, ficha):
 
 @app.route('/processar-linha', methods=['POST'])
 def processar_linha():
-    # 1. Recebe os dados do n8n
     dados = request.get_json()
     if not dados:
         return jsonify({"erro": "Nenhum dado recebido"}), 400
@@ -149,31 +177,27 @@ def processar_linha():
     if not link or not ficha:
         return jsonify({"erro": "Link ou ficha ausentes"}), 400
 
-    # Tratamento da URL para resolver o erro "invalid argument" do Selenium
+    # Tratamento da URL 
     link = str(link).strip()
     if not link.startswith(('http://', 'https://')):
         link = f"https://{link}"
 
     print(f"🚀 Iniciando processamento da Ficha: {ficha} | Link: {link}")
 
-    # 2. Cria uma pasta temporária ÚNICA para essa execução
     pasta_tmp = f"/tmp/downloads_{uuid.uuid4().hex}"
     os.makedirs(pasta_tmp, exist_ok=True)
 
     driver = None
     try:
-        # 3. Inicia o Selenium e navega
         driver = criar_driver(pasta_tmp)
         driver.get(link)
-        time.sleep(5)
-
-        # 4. Executa a sua automação de clique/download
+        
+        # Chama a nova função de cliques robustos
         baixaraquivos(driver, pasta_tmp)
 
-        # 5. Processa os arquivos baixados e pega o caminho do arquivo final
+        # Filtra para devolver apenas a Guia PDF
         caminho_final = salva_apenas_guia(pasta_tmp, ficha)
 
-        # 6. Devolve o arquivo via Webhook pro n8n
         if caminho_final and os.path.exists(caminho_final):
             nome_arquivo = os.path.basename(caminho_final)
             return send_file(
@@ -183,13 +207,12 @@ def processar_linha():
                 download_name=nome_arquivo
             )
         else:
-            return jsonify({"erro": f"Guia não encontrada para a ficha {ficha}"}), 404
+            return jsonify({"erro": f"A pasta foi baixada, mas nenhum PDF com 'guia' no nome foi encontrado."}), 404
 
     except Exception as e:
         return jsonify({"erro": f"Erro interno: {str(e)}"}), 500
 
     finally:
-        # 7. Limpa a memória e apaga a pasta temporária
         if driver:
             driver.quit()
         if os.path.exists(pasta_tmp):
